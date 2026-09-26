@@ -10,9 +10,15 @@ import https from 'node:https';
 import { basename, join } from 'node:path';
 import type { Cue } from './interactive.js';
 
+/** Share of the work done, 0–1; called after each piece. */
+export type TranscribeProgress = (done: number) => Promise<void> | void;
+
 export interface Transcriber {
-  transcribe(file: string): Promise<Cue[]>;
+  transcribe(file: string, onProgress?: TranscribeProgress): Promise<Cue[]>;
 }
+
+/** Pieces sent at the same time: a lesson of 90 minutes is 9 pieces. */
+export const PARALLEL_PIECES = 3;
 
 export interface TranscriberSettings {
   url: string;
@@ -183,18 +189,42 @@ export class OpenAiCompatibleTranscriber implements Transcriber {
     private readonly fetchImpl: Fetch = slowServiceFetch()
   ) {}
 
-  async transcribe(file: string): Promise<Cue[]> {
+  async transcribe(file: string, onProgress?: TranscribeProgress): Promise<Cue[]> {
     const dir = this.workDir(file);
     const { mkdir } = await import('node:fs/promises');
     await mkdir(dir, { recursive: true });
     const parts = await splitAudio(file, dir);
-    const cues: Cue[] = [];
-    for (const [i, part] of parts.entries()) {
-      const offset = i * CHUNK_SECONDS;
-      for (const cue of await transcribeFile(this.settings, part, this.fetchImpl)) {
-        cues.push({ start: cue.start + offset, end: cue.end + offset, text: cue.text });
+    const results: Cue[][] = new Array(parts.length);
+    let next = 0;
+    let done = 0;
+    // A few pieces at once; each lane takes the next piece until none is left. After a
+    // failure no new piece starts, and the pieces already running finish before the error
+    // goes up (the caller removes the files afterwards).
+    let failed = false;
+    const lane = async () => {
+      while (!failed && next < parts.length) {
+        const i = next++;
+        const offset = i * CHUNK_SECONDS;
+        const cues = await transcribeFile(this.settings, parts[i]!, this.fetchImpl);
+        results[i] = cues.map((c) => ({
+          ...c,
+          start: c.start + offset,
+          end: c.end + offset,
+        }));
+        done++;
+        await onProgress?.(done / parts.length);
       }
-    }
-    return cues;
+    };
+    const lanes = await Promise.allSettled(
+      Array.from({ length: Math.min(PARALLEL_PIECES, parts.length) }, () =>
+        lane().catch((error: unknown) => {
+          failed = true;
+          throw error;
+        })
+      )
+    );
+    const rejected = lanes.find((l) => l.status === 'rejected');
+    if (rejected) throw rejected.reason;
+    return results.flat();
   }
 }

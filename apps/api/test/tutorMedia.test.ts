@@ -31,6 +31,7 @@ function access(opts: {
               status: 'ready' as const,
               source: 'whisper' as const,
               error: null,
+              progress: null,
               updatedAt: '',
               cues: [
                 { start: 5, end: 9, text: 'بِسْمِ اللهِ' },

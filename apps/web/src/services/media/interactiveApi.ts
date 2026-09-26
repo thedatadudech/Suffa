@@ -7,6 +7,8 @@ export interface Transcript {
   source: 'whisper' | 'manual';
   cues: Cue[];
   error: string | null;
+  /** 0–100 while an automatic transcript is being made. */
+  progress?: number | null;
   updatedAt: string;
 }
 

@@ -19,6 +19,8 @@ import { CheckpointData, Cues, type InteractiveRepository } from './interactive.
 import type { SummaryRepository } from './summary.js';
 import type { MediaRepository } from './repository.js';
 
+/** A transcript run without progress for this long is taken as lost (a piece takes about a minute). */
+export const STALE_TRANSCRIPT_MS = 10 * 60 * 1000;
 export interface InteractiveRouteDeps {
   classes: { scope(classId: string, userId: string): Promise<ClassScope> };
   media: MediaRepository;
@@ -143,6 +145,13 @@ export function createInteractiveRoutes(deps: InteractiveRouteDeps): Hono<ActorE
     if (!deps.transcribe) return c.json({ error: 'transcription_unavailable' }, 409);
     if (!(await deps.interactive.aiEnabled(item.classId))) {
       return c.json({ error: 'ai_disabled' }, 409);
+    }
+    // A run that is still moving is left alone; one without progress for a while lost
+    // its worker and is queued again.
+    const current = await deps.interactive.transcript(item.id);
+    const active = current?.status === 'queued' || current?.status === 'processing';
+    if (active && Date.now() - Date.parse(current.updatedAt) < STALE_TRANSCRIPT_MS) {
+      return c.body(null, 202);
     }
     await deps.interactive.saveTranscript(item.id, {
       status: 'queued',

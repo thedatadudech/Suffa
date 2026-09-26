@@ -114,6 +114,40 @@ export function RecordingPlayer() {
     void load();
   }, [load]);
 
+  // Transcript, checkpoints and summary only: the media URLs stay, so playback never
+  // restarts while the page looks again for a running transcript or summary.
+  // Polls and button refreshes may overlap: only the newest answer is applied.
+  const latest = useRef(0);
+  const refresh = useCallback(async () => {
+    const request = ++latest.current;
+    const result = await api.get(id, mediaId);
+    if (!result.ok || request !== latest.current) return;
+    const data = result.value;
+    setMedia(
+      (m) =>
+        m && {
+          ...m,
+          cues: data.transcript?.status === 'ready' ? data.transcript.cues : [],
+          checkpoints: data.checkpoints,
+          interactive: data,
+        }
+    );
+  }, [api, id, mediaId]);
+
+  // Tell the teacher when an automatic transcript is done (they may be elsewhere on the page).
+  const transcriptStatus = media?.interactive?.transcript?.status;
+  const lastStatus = useRef(transcriptStatus);
+  useEffect(() => {
+    const before = lastStatus.current;
+    lastStatus.current = transcriptStatus;
+    if (
+      (before === 'queued' || before === 'processing') &&
+      transcriptStatus === 'ready'
+    ) {
+      celebrate({ title: 'Transkript ist fertig', xp: 0, big: false });
+    }
+  }, [transcriptStatus, celebrate]);
+
   const done = useMemo(() => {
     const ids = new Set(shown.current);
     for (const cp of media?.checkpoints ?? []) {
@@ -297,7 +331,7 @@ export function RecordingPlayer() {
           teacher={teacher}
           canSummarize={media.interactive.canSummarize ?? false}
           hasTranscript={media.cues.length > 0}
-          onChange={() => void load()}
+          onChange={() => void refresh()}
         />
       )}
       <TranscriptPanel cues={media.cues} time={time} onSeek={seek} />
@@ -309,25 +343,30 @@ export function RecordingPlayer() {
             mediaId={mediaId}
             checkpoints={media.checkpoints}
             currentTime={() => element.current?.currentTime ?? 0}
-            onChange={() => void load()}
+            onChange={() => void refresh()}
           />
           {media.interactive.canSuggest && media.cues.length > 0 && (
             <SuggestionsEditor
               api={api}
               classId={id}
               mediaId={mediaId}
-              onChange={() => void load()}
+              onChange={() => void refresh()}
             />
           )}
           <TranscriptEditor
-            key={media.interactive.transcript?.updatedAt ?? 'none'}
+            // New server cues (ready, saved) replace the draft; progress updates do not.
+            key={
+              media.interactive.transcript?.status === 'ready'
+                ? media.interactive.transcript.updatedAt
+                : (media.interactive.transcript?.status ?? 'none')
+            }
             api={api}
             classId={id}
             mediaId={mediaId}
             transcript={media.interactive.transcript}
             canGenerate={media.interactive.canGenerate}
             currentTime={() => element.current?.currentTime ?? 0}
-            onChange={() => void load()}
+            onChange={() => void refresh()}
           />
         </>
       )}

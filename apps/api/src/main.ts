@@ -243,7 +243,16 @@ async function main(): Promise<void> {
                         },
                         mediaId
                       )
-                  : undefined,
+                  : // The api queued it (it has the settings), this worker has not: say so
+                    // instead of leaving the transcript "queued" for ever.
+                    async (mediaId) => {
+                      log.warn({ mediaId }, 'transcribe.not_configured_on_worker');
+                      await new PgInteractiveRepository(pool).saveTranscript(mediaId, {
+                        status: 'failed',
+                        error:
+                          'Die Transkription ist auf dem Server nicht vollständig eingerichtet (Worker ohne SUFFA_TRANSCRIBE_URL).',
+                      });
+                    },
                 onReady: config.transcribe
                   ? async (mediaId) => {
                       const item = await repo.byId(mediaId);

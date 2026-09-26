@@ -90,7 +90,7 @@ describe('Lesson summary', () => {
     ).toBeNull();
   });
 
-  it('shows learners only a published summary, without buttons', () => {
+  it('shows learners only a published summary, without buttons', async () => {
     setup({
       summary: {
         status: 'ready',
@@ -101,8 +101,14 @@ describe('Lesson summary', () => {
       teacher: false,
     });
     expect(screen.getByRole('heading', { name: 'Zusammenfassung' })).toBeTruthy();
-    expect(screen.getByText('Die Lehrerin übt das Vorstellen.')).toBeTruthy();
-    expect(screen.queryByRole('button')).toBeNull();
+    expect(screen.getByText('Die Lehrerin übt das Vorstellen.')).toBeVisible();
+    // Only the fold button, no teacher actions; folding hides the text.
+    const fold = screen.getByRole('button');
+    expect(fold).toHaveAccessibleName(/Zuklappen/);
+    await userEvent.click(fold);
+    expect(screen.getByText('Die Lehrerin übt das Vorstellen.')).not.toBeVisible();
+    expect(screen.getByRole('button')).toHaveAttribute('aria-expanded', 'false');
+    localStorage.clear();
   });
 
   it('shows nothing to learners without a summary', () => {

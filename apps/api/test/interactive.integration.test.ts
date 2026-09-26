@@ -240,6 +240,15 @@ describe.skipIf(!dbUrl || !s3)(
         (await call('teacher', 'POST', `/media/${mediaId}/transcript/generate`)).status
       ).toBe(202);
       expect(queued).toEqual([mediaId]);
+      // Pressed again while it waits: no second job; after 10 minutes without news, yes.
+      await call('teacher', 'POST', `/media/${mediaId}/transcript/generate`);
+      expect(queued).toEqual([mediaId]);
+      await pool.query(
+        `update media_transcripts set updated_at = now() - interval '11 minutes' where media_id = $1`,
+        [mediaId]
+      );
+      await call('teacher', 'POST', `/media/${mediaId}/transcript/generate`);
+      expect(queued).toEqual([mediaId, mediaId]);
       expect(
         (await call('teacher', 'PATCH', '/settings', { aiEnabled: false })).status
       ).toBe(204);
@@ -265,18 +274,29 @@ describe.skipIf(!dbUrl || !s3)(
       expect(await interactive.transcript(mediaId)).toMatchObject({ status: 'failed' });
 
       await call('teacher', 'PATCH', '/settings', { aiEnabled: true });
+      const seen: (number | null)[] = [];
       await transcribeRecording(
         {
           media,
           interactive,
           storage,
-          transcriber: { transcribe: async () => [{ start: 0, end: 2, text: 'أهلا' }] },
+          transcriber: {
+            transcribe: async (_file, onProgress) => {
+              seen.push((await interactive.transcript(mediaId))!.progress);
+              await onProgress?.(0.5);
+              seen.push((await interactive.transcript(mediaId))!.progress);
+              return [{ start: 0, end: 2, text: 'أهلا' }];
+            },
+          },
           log: quiet,
         },
         mediaId
       );
+      // The teacher sees how far it has come: 5 % after the download, then per piece.
+      expect(seen).toEqual([5, 52]);
       expect(await interactive.transcript(mediaId)).toMatchObject({
         status: 'ready',
+        progress: null,
         cues: [{ start: 0, end: 2, text: 'أهلا' }],
       });
     });

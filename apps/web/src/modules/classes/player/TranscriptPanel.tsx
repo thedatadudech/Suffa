@@ -1,5 +1,9 @@
-/** Transcript under the player (story 8.1): the current line is marked; a tap jumps there. */
-import { useEffect, useRef } from 'react';
+/**
+ * Transcript under the player (story 8.1): the current line is marked; a tap jumps there.
+ * With "Mitlaufen" on, the list scrolls along with playback (only the list, not the page).
+ */
+import { useEffect, useRef, useState } from 'react';
+import { CollapsibleCard } from '@/components';
 import { activeCue, clock, type Cue } from '@/services/media/checkpoints';
 
 export function TranscriptPanel({
@@ -13,18 +17,36 @@ export function TranscriptPanel({
 }) {
   const current = activeCue(cues, time);
   const list = useRef<HTMLOListElement>(null);
+  const [follow, setFollow] = useState(readFollow);
+  // Bumped when the card is opened again: the list was hidden and must be re-aligned.
+  const [shown, setShown] = useState(0);
 
   useEffect(() => {
-    const el = list.current?.children[current] as HTMLElement | undefined;
-    el?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
-  }, [current]);
+    const box = list.current;
+    const el = box?.children[current] as HTMLElement | undefined;
+    if (!follow || !box || !el) return;
+    // Keep the current line in the upper third of the list.
+    box.scrollTo?.({ top: el.offsetTop - box.clientHeight / 3, behavior: 'smooth' });
+  }, [current, follow, shown]);
 
   if (cues.length === 0) return null;
   return (
-    <section className="card stack" aria-labelledby="transcript-title">
-      <h2 id="transcript-title" className="eyebrow">
-        Transkript
-      </h2>
+    <CollapsibleCard
+      id="transcript"
+      title="Transkript"
+      onOpenChange={(open) => open && setShown((n) => n + 1)}
+    >
+      <label className="row muted" style={{ gap: '0.4rem', fontSize: '0.9rem' }}>
+        <input
+          type="checkbox"
+          checked={follow}
+          onChange={(e) => {
+            setFollow(e.target.checked);
+            saveFollow(e.target.checked);
+          }}
+        />
+        Text mitlaufen lassen
+      </label>
       <ol className="transcript" ref={list}>
         {cues.map((cue, i) => (
           <li
@@ -40,6 +62,25 @@ export function TranscriptPanel({
           </li>
         ))}
       </ol>
-    </section>
+    </CollapsibleCard>
   );
+}
+
+const FOLLOW_KEY = 'suffa.transcript.follow';
+
+/** On unless the learner switched it off on this device. */
+function readFollow(): boolean {
+  try {
+    return localStorage.getItem(FOLLOW_KEY) !== 'off';
+  } catch {
+    return true;
+  }
+}
+
+function saveFollow(on: boolean): void {
+  try {
+    localStorage.setItem(FOLLOW_KEY, on ? 'on' : 'off');
+  } catch {
+    // Private mode or storage blocked: the choice lasts for this visit only.
+  }
 }

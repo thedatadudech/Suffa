@@ -54,6 +54,8 @@ export interface Transcript {
   source: 'whisper' | 'manual';
   cues: Cue[];
   error: string | null;
+  /** 0–100 while an automatic transcript is being made, otherwise null. */
+  progress: number | null;
   updatedAt: string;
 }
 
@@ -61,7 +63,9 @@ export interface InteractiveRepository {
   transcript(mediaId: string): Promise<Transcript | null>;
   saveTranscript(
     mediaId: string,
-    change: Partial<Pick<Transcript, 'status' | 'source' | 'cues' | 'error'>>,
+    change: Partial<
+      Pick<Transcript, 'status' | 'source' | 'cues' | 'error' | 'progress'>
+    >,
     editedBy?: string
   ): Promise<void>;
   checkpoints(mediaId: string): Promise<Checkpoint[]>;
@@ -91,6 +95,7 @@ export class PgInteractiveRepository implements InteractiveRepository {
           source: r.source,
           cues: r.cues,
           error: r.error,
+          progress: r.progress ?? null,
           updatedAt: r.updated_at.toISOString(),
         }
       : null;
@@ -98,18 +103,21 @@ export class PgInteractiveRepository implements InteractiveRepository {
 
   async saveTranscript(
     mediaId: string,
-    change: Partial<Pick<Transcript, 'status' | 'source' | 'cues' | 'error'>>,
+    change: Partial<
+      Pick<Transcript, 'status' | 'source' | 'cues' | 'error' | 'progress'>
+    >,
     editedBy?: string
   ) {
     await this.pool.query(
-      `insert into media_transcripts (media_id, status, source, cues, error, edited_by)
-       values ($1, coalesce($2, 'ready'), coalesce($3, 'manual'), coalesce($4::jsonb, '[]'::jsonb), $5, $6)
+      `insert into media_transcripts (media_id, status, source, cues, error, edited_by, progress)
+       values ($1, coalesce($2, 'ready'), coalesce($3, 'manual'), coalesce($4::jsonb, '[]'::jsonb), $5, $6, $7)
        on conflict (media_id) do update set
          status = coalesce($2, media_transcripts.status),
          source = coalesce($3, media_transcripts.source),
          cues = coalesce($4::jsonb, media_transcripts.cues),
          error = $5,
          edited_by = coalesce($6, media_transcripts.edited_by),
+         progress = $7,
          updated_at = now()`,
       [
         mediaId,
@@ -118,6 +126,7 @@ export class PgInteractiveRepository implements InteractiveRepository {
         change.cues ? JSON.stringify(change.cues) : null,
         change.error ?? null,
         editedBy ?? null,
+        change.progress ?? null,
       ]
     );
   }
@@ -164,6 +173,9 @@ export class PgInteractiveRepository implements InteractiveRepository {
   }
 }
 
+/** How often a running transcript touches its row; well below the 10-minute restart limit. */
+export const HEARTBEAT_MS = 2 * 60 * 1000;
+
 /** Worker step (story 8.1): the recording's audio → transcript cues. */
 export async function transcribeRecording(
   deps: {
@@ -192,12 +204,34 @@ export async function transcribeRecording(
   await deps.interactive.saveTranscript(mediaId, {
     status: 'processing',
     source: 'whisper',
+    progress: 0,
   });
   const dir = await mkdtemp(join(tmpdir(), 'suffa-transcribe-'));
   try {
     const audio = join(dir, 'audio.m4a');
     await deps.storage.download('media', item.renditions.audio, audio);
-    const cues = await deps.transcriber.transcribe(audio);
+    // The download is the first 5 %, the pieces the rest.
+    await deps.interactive.saveTranscript(mediaId, { progress: 5 });
+    // Pieces finish in parallel: the updates go out one after another, so the bar never
+    // steps back. A heartbeat keeps the row fresh during a long piece, so the teacher is
+    // only offered a restart when the worker is really gone.
+    let progress = 5;
+    let saved = Promise.resolve();
+    const write = () => {
+      saved = saved.then(() => deps.interactive.saveTranscript(mediaId, { progress }));
+      return saved;
+    };
+    const heartbeat = setInterval(() => void write().catch(() => {}), HEARTBEAT_MS);
+    let cues: Cue[];
+    try {
+      cues = await deps.transcriber.transcribe(audio, (done) => {
+        progress = 5 + Math.floor(done * 94);
+        return write();
+      });
+    } finally {
+      clearInterval(heartbeat);
+      await saved.catch(() => {});
+    }
     await deps.interactive.saveTranscript(mediaId, {
       status: 'ready',
       cues,

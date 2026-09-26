@@ -175,17 +175,72 @@ describe('transcription client', () => {
         '16k',
         file,
       ]);
-      const fetchImpl = vi.fn(async () =>
-        Response.json({ segments: [{ start: 1, end: 2, text: 'x' }] })
-      ) as unknown as typeof fetch;
+      // The first piece answers last: the cues must still come back in order.
+      const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+        const name = ((init.body as FormData).get('file') as File).name;
+        const first = name.includes('000');
+        await new Promise((r) => setTimeout(r, first ? 50 : 0));
+        return Response.json({
+          segments: [{ start: 1, end: 2, text: first ? 'a' : 'b' }],
+        });
+      }) as unknown as typeof fetch;
+      const progress: number[] = [];
       const cues = await new OpenAiCompatibleTranscriber(
         settings,
         () => join(dir, 'parts'),
         fetchImpl
-      ).transcribe(file);
-      expect(cues.map((c) => c.start)).toEqual([1, CHUNK_SECONDS + 1]);
+      ).transcribe(file, (done) => {
+        progress.push(done);
+      });
+      expect(cues.map((c) => [c.start, c.text])).toEqual([
+        [1, 'a'],
+        [CHUNK_SECONDS + 1, 'b'],
+      ]);
+      expect(progress).toEqual([0.5, 1]);
       await rm(dir, { recursive: true });
     },
     60_000
+  );
+
+  it.skipIf(!hasFfmpeg)(
+    'after a failed piece starts no new one and waits for the running ones',
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'suffa-stt-'));
+      const file = join(dir, 'long.m4a');
+      execFileSync('ffmpeg', [
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-f',
+        'lavfi',
+        '-i',
+        `sine=frequency=300:duration=${CHUNK_SECONDS * 4 + 30}`,
+        '-c:a',
+        'aac',
+        '-b:a',
+        '16k',
+        file,
+      ]);
+      let slowDone = false;
+      const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => {
+        const name = ((init.body as FormData).get('file') as File).name;
+        if (name.includes('000')) return new Response('boom', { status: 500 });
+        await new Promise((r) => setTimeout(r, 80));
+        slowDone = true;
+        return Response.json({ segments: [] });
+      }) as unknown as typeof fetch;
+      await expect(
+        new OpenAiCompatibleTranscriber(
+          settings,
+          () => join(dir, 'parts'),
+          fetchImpl
+        ).transcribe(file)
+      ).rejects.toThrow(/500/);
+      // 5 pieces, 3 lanes: the failure stops the queue; the two running pieces finished first.
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(slowDone).toBe(true);
+      await rm(dir, { recursive: true });
+    },
+    120_000
   );
 });
